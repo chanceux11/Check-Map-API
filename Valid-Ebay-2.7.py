@@ -918,26 +918,53 @@ class EbayEmailChecker:
             # Parse sock string
             sock_parts = sock_str.strip().split(':')
             if len(sock_parts) == 2:
-                proxy_url = f"socks5://{sock_parts[0]}:{sock_parts[1]}"
+                # Thử cả socks4 và socks5
+                proxy_urls = [
+                    f"socks5://{sock_parts[0]}:{sock_parts[1]}",
+                    f"socks4://{sock_parts[0]}:{sock_parts[1]}"
+                ]
             elif len(sock_parts) == 4:
-                proxy_url = f"socks5://{sock_parts[2]}:{sock_parts[3]}@{sock_parts[0]}:{sock_parts[1]}"
+                proxy_urls = [
+                    f"socks5://{sock_parts[2]}:{sock_parts[3]}@{sock_parts[0]}:{sock_parts[1]}",
+                    f"socks4://{sock_parts[2]}:{sock_parts[3]}@{sock_parts[0]}:{sock_parts[1]}"
+                ]
             else:
+                self.queue.put({'type': 'log', 'text': f"Invalid sock format: {sock_str}"})
                 return False
 
-            # Test proxy with a request to eBay
-            connector = aiohttp.TCPConnector(ssl=False)
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as test_session:
+            headers = {
+                "User-Agent": random.choice(self.user_agents),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+            }
+            
+            connector = aiohttp.TCPConnector(ssl=False, force_close=True)
+            timeout = aiohttp.ClientTimeout(total=15)
+
+            # Thử từng protocol
+            for proxy_url in proxy_urls:
                 try:
-                    async with test_session.get(
-                        'https://www.ebay.com',
-                        proxy=proxy_url,
-                        timeout=10
-                    ) as response:
-                        return response.status == 200
-                except:
-                    return False
-        except:
+                    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as test_session:
+                        self.queue.put({'type': 'log', 'text': f"Testing {proxy_url}..."})
+                        async with test_session.get(
+                            'http://ip-api.com/json',  # Dùng API kiểm tra IP để test proxy
+                            proxy=proxy_url,
+                            headers=headers,
+                            timeout=15
+                        ) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                if data.get('status') == 'success':
+                                    self.queue.put({'type': 'log', 'text': f"Sock working ({proxy_url.split('://')[0]}): {sock_str}"})
+                                    return True
+                except Exception as e:
+                    self.queue.put({'type': 'log', 'text': f"Failed with {proxy_url}: {str(e)}"})
+                    continue
+
+            self.queue.put({'type': 'log', 'text': f"All protocols failed for sock: {sock_str}"})
+            return False
+            
+        except Exception as e:
+            self.queue.put({'type': 'log', 'text': f"Sock validation error: {sock_str} - {str(e)}"})
             return False
 
     async def initialize_socks(self):
